@@ -75,6 +75,7 @@ export async function transaction<T>(
       await client.query('ROLLBACK').then(
         () => runRollback(),
         () => {
+          if (!stopped) stop();
           if (!commitStarted) runRollback();
         },
       );
