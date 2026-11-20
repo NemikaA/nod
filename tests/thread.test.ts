@@ -13865,6 +13865,77 @@ test(
   },
 );
 
+test('transaction runs afterRollback callbacks when aborted before commit', async () => {
+  const { afterCommit, afterRollback, transaction } = await import('../src/server/transaction.ts');
+  const controller = new AbortController();
+  const reason = new Error('cancelled');
+  const released: Array<boolean | undefined> = [];
+  const client = {
+    async query(_sql: string) {
+      return { rows: [] };
+    },
+    release(destroy?: boolean) {
+      released.push(destroy);
+    },
+  };
+  const database = {
+    async connect() {
+      return client;
+    },
+  } as unknown as pg.Pool;
+  let rolledBack = 0;
+  let committed = 0;
+  await assert.rejects(
+    transaction(
+      async (tx) => {
+        afterRollback(tx, () => {
+          rolledBack++;
+        });
+        afterCommit(tx, () => {
+          committed++;
+        });
+        controller.abort(reason);
+      },
+      database,
+      controller.signal,
+    ),
+    (error) => error === reason,
+  );
+  assert.equal(rolledBack, 1);
+  assert.equal(committed, 0);
+  assert.deepEqual(released, [true]);
+
+  const afterCommitController = new AbortController();
+  const releasedAfterCommit: Array<boolean | undefined> = [];
+  const commitClient = {
+    async query(_sql: string) {
+      return { rows: [] };
+    },
+    release(destroy?: boolean) {
+      releasedAfterCommit.push(destroy);
+    },
+  };
+  let postCommitRollbacks = 0;
+  await transaction(
+    async (tx) => {
+      afterRollback(tx, () => {
+        postCommitRollbacks++;
+      });
+      afterCommit(tx, () => {
+        afterCommitController.abort(reason);
+      });
+    },
+    {
+      async connect() {
+        return commitClient;
+      },
+    } as unknown as pg.Pool,
+    afterCommitController.signal,
+  );
+  assert.equal(postCommitRollbacks, 0);
+  assert.deepEqual(releasedAfterCommit, [undefined]);
+});
+
 test('a first task stays open after its chat turn ends and follows its own saved task', () => {
   const messages = [
     { id: 'old-request', role: 'user' as const, text: 'Draft the reply', turnId: 'old-turn' },
