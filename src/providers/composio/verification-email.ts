@@ -4,15 +4,54 @@ import { z } from 'zod';
 import { parse } from 'tldts';
 import type { VerificationEmail, VerificationEmailQuery } from '../../ports/integrations.ts';
 
-function withoutComments(value: string) {
-  let plain = '';
+function splitMailboxList(value: string) {
+  const parts: string[] = [];
+  let start = 0;
+  let quoted = false;
   let depth = 0;
   for (let index = 0; index < value.length; index++) {
     const char = value[index];
-    if (char === '\\' && depth > 0) {
+    if (char === '\\' && (quoted || depth > 0)) {
       index++;
       continue;
     }
+    if (depth === 0 && char === '"') {
+      quoted = !quoted;
+      continue;
+    }
+    if (quoted) continue;
+    if (char === '(') {
+      depth++;
+      continue;
+    }
+    if (char === ')') {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+    if (depth === 0 && char === ',') {
+      parts.push(value.slice(start, index));
+      start = index + 1;
+    }
+  }
+  parts.push(value.slice(start));
+  return parts;
+}
+
+function unquotedWithoutComments(value: string) {
+  let plain = '';
+  let quoted = false;
+  let depth = 0;
+  for (let index = 0; index < value.length; index++) {
+    const char = value[index];
+    if (char === '\\' && (quoted || depth > 0)) {
+      index++;
+      continue;
+    }
+    if (depth === 0 && char === '"') {
+      quoted = !quoted;
+      continue;
+    }
+    if (quoted) continue;
     if (char === '(') {
       depth++;
       continue;
@@ -23,12 +62,14 @@ function withoutComments(value: string) {
     }
     if (depth === 0) plain += char;
   }
+  if (quoted || depth > 0) return;
   return plain;
 }
 
 export const mailbox = (value: string) => {
-  if (/[,;\r\n]/.test(value)) return;
-  const plain = withoutComments(value);
+  if (/[\r\n]/.test(value)) return;
+  const plain = unquotedWithoutComments(value);
+  if (!plain || /[,;]/.test(plain)) return;
   const bracketed = [...plain.matchAll(/<([^<>\s]+@[^<>\s]+)>/g)];
   const address = (bracketed.at(-1)?.[1] ?? plain).trim().toLowerCase();
   return z.email().max(320).safeParse(address).success ? address : undefined;
@@ -174,7 +215,7 @@ export async function readVerificationEmails(
         .map((header) => header.value);
     const sender = headers('from');
     const recipients = headers('to')
-      .flatMap((value) => value.split(','))
+      .flatMap(splitMailboxList)
       .map(mailbox)
       .filter((value): value is string => Boolean(value));
     const address = sender.length === 1 ? mailbox(sender[0]) : undefined;
