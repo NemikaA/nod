@@ -37,10 +37,16 @@ function splitMailboxList(value: string) {
   return parts;
 }
 
-function unquotedWithoutComments(value: string) {
-  let plain = '';
+export const mailbox = (value: string) => {
+  if (/[\r\n]/.test(value)) return;
   let quoted = false;
+  let hadQuote = false;
   let depth = 0;
+  let inAngle = false;
+  let angleClosed = false;
+  let angleAddr = '';
+  let bare = '';
+  let afterAngle = '';
   for (let index = 0; index < value.length; index++) {
     const char = value[index];
     if (char === '\\' && (quoted || depth > 0)) {
@@ -48,7 +54,9 @@ function unquotedWithoutComments(value: string) {
       continue;
     }
     if (depth === 0 && char === '"') {
+      if (inAngle || angleClosed) return;
       quoted = !quoted;
+      hadQuote = true;
       continue;
     }
     if (quoted) continue;
@@ -57,21 +65,35 @@ function unquotedWithoutComments(value: string) {
       continue;
     }
     if (char === ')') {
-      depth = Math.max(0, depth - 1);
+      if (depth === 0) return;
+      depth--;
       continue;
     }
-    if (depth === 0) plain += char;
+    if (depth > 0) continue;
+    if (char === ',' || char === ';') return;
+    if (char === '<') {
+      if (inAngle || angleClosed) return;
+      inAngle = true;
+      continue;
+    }
+    if (char === '>') {
+      if (!inAngle) return;
+      inAngle = false;
+      angleClosed = true;
+      continue;
+    }
+    if (inAngle) angleAddr += char;
+    else if (angleClosed) afterAngle += char;
+    else bare += char;
   }
-  if (quoted || depth > 0) return;
-  return plain;
-}
-
-export const mailbox = (value: string) => {
-  if (/[\r\n]/.test(value)) return;
-  const plain = unquotedWithoutComments(value);
-  if (!plain || /[,;]/.test(plain)) return;
-  const bracketed = [...plain.matchAll(/<([^<>\s]+@[^<>\s]+)>/g)];
-  const address = (bracketed.at(-1)?.[1] ?? plain).trim().toLowerCase();
+  if (quoted || depth > 0 || inAngle) return;
+  if (angleClosed) {
+    if (afterAngle.trim()) return;
+    const address = angleAddr.toLowerCase();
+    return z.email().max(320).safeParse(address).success ? address : undefined;
+  }
+  if (hadQuote) return;
+  const address = bare.trim().toLowerCase();
   return z.email().max(320).safeParse(address).success ? address : undefined;
 };
 const headerSchema = z.object({ name: z.string().max(100), value: z.string().max(8192) });

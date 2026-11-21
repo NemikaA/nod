@@ -3096,6 +3096,14 @@ test('Gmail verification uses fixed account-bound read endpoints and validates r
   assert.equal((await read())?.length, 1);
   sender = '"TOConline (EU" <login@toconline.pt>';
   assert.equal((await read())?.length, 1);
+  sender = 'lo"g"in@toconline.pt';
+  assert.deepEqual(await read(), []);
+  sender = '"TOConline" login@toconline.pt';
+  assert.deepEqual(await read(), []);
+  sender = '<lo"g"in@toconline.pt>';
+  assert.deepEqual(await read(), []);
+  sender = '<login@toconline.pt> "extra"';
+  assert.deepEqual(await read(), []);
   recipient = request.recipient;
   sender = 'login@toconline.pt';
   recipient = 'other@example.com';
