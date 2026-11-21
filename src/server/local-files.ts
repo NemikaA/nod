@@ -435,15 +435,13 @@ export function createLocalFiles(
       });
     }
     if (info.isDirectory()) {
-      const snapshot = async (root: string) => {
-        const entries: string[] = [];
-        const files: string[] = [];
-        const dirs: string[] = [];
+      const fingerprint = async (root: string) => {
+        const hash = createHash('sha256');
+        const sep = '\u0000';
         const walk = async (dir: string, prefix: string) => {
           const dirInfo = await lstat(dir, { bigint: true });
-          dirs.push(dir);
-          entries.push(
-            `d:${prefix}:${dirInfo.dev}:${dirInfo.ino}:${dirInfo.mode}:${dirInfo.mtimeNs}:${dirInfo.ctimeNs}`,
+          hash.update(
+            `d${sep}${prefix}${sep}${dirInfo.dev}${sep}${dirInfo.ino}${sep}${dirInfo.mode}${sep}${dirInfo.mtimeNs}${sep}${dirInfo.ctimeNs}${sep}`,
           );
           const names = (await readdir(dir)).sort();
           for (const name of names) {
@@ -453,26 +451,33 @@ export function createLocalFiles(
             if (entryInfo.isDirectory()) {
               await walk(full, rel);
             } else if (entryInfo.isSymbolicLink()) {
-              files.push(full);
               const pointer = await readlink(full);
-              entries.push(
-                `l:${rel}:${entryInfo.dev}:${entryInfo.ino}:${entryInfo.mode}:${entryInfo.mtimeNs}:${entryInfo.ctimeNs}:${pointer}`,
+              hash.update(
+                `l${sep}${rel}${sep}${entryInfo.dev}${sep}${entryInfo.ino}${sep}${entryInfo.mode}${sep}${entryInfo.mtimeNs}${sep}${entryInfo.ctimeNs}${sep}${pointer}${sep}`,
               );
             } else {
-              files.push(full);
-              entries.push(
-                `f:${rel}:${entryInfo.dev}:${entryInfo.ino}:${entryInfo.mode}:${entryInfo.size}:${entryInfo.mtimeNs}:${entryInfo.ctimeNs}`,
+              hash.update(
+                `f${sep}${rel}${sep}${entryInfo.dev}${sep}${entryInfo.ino}${sep}${entryInfo.mode}${sep}${entryInfo.size}${sep}${entryInfo.mtimeNs}${sep}${entryInfo.ctimeNs}${sep}`,
               );
             }
           }
         };
         await walk(root, '');
-        return { entries, files, dirs };
+        return hash.digest('hex');
+      };
+      const removeCopied = async (srcDir: string, dstDir: string) => {
+        for (const name of await readdir(dstDir)) {
+          const srcChild = nodePath.join(srcDir, name);
+          const dstChild = nodePath.join(dstDir, name);
+          const dstInfo = await lstat(dstChild);
+          if (dstInfo.isDirectory()) await removeCopied(srcChild, dstChild);
+          else await rm(srcChild);
+        }
+        await rmdir(srcDir);
       };
       const copyDirectory = async () => {
-        let before: Awaited<ReturnType<typeof snapshot>>;
         try {
-          before = await snapshot(source);
+          const before = await fingerprint(source);
           for (const name of await readdir(source))
             await cp(nodePath.join(source, name), nodePath.join(target, name), {
               recursive: true,
@@ -481,19 +486,18 @@ export function createLocalFiles(
               verbatimSymlinks: true,
               preserveTimestamps: true,
             });
-          const after = await snapshot(source);
-          if (
-            before.entries.length !== after.entries.length ||
-            before.entries.some((entry, index) => entry !== after.entries[index])
-          ) {
-            throw new IntegrationError(`${source} changed while moving. Try the move again.`);
+          const after = await fingerprint(source);
+          if (before !== after) {
+            throw new IntegrationError(
+              `${source} changed while moving. Nothing was changed. Try the move again.`,
+              409,
+            );
           }
         } catch (copy) {
           await rm(target, { recursive: true, force: true });
           throw copy;
         }
-        for (const file of before.files) await rm(file);
-        for (const dir of [...before.dirs].reverse()) await rmdir(dir);
+        await removeCopied(source, target);
       };
       if (process.platform === 'win32') {
         return rename(source, target).catch(async (error: NodeJS.ErrnoException) => {
