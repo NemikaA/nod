@@ -435,8 +435,44 @@ export function createLocalFiles(
       });
     }
     if (info.isDirectory()) {
+      const snapshot = async (root: string) => {
+        const entries: string[] = [];
+        const files: string[] = [];
+        const dirs: string[] = [];
+        const walk = async (dir: string, prefix: string) => {
+          const dirInfo = await lstat(dir, { bigint: true });
+          dirs.push(dir);
+          entries.push(
+            `d:${prefix}:${dirInfo.dev}:${dirInfo.ino}:${dirInfo.mode}:${dirInfo.mtimeNs}:${dirInfo.ctimeNs}`,
+          );
+          const names = (await readdir(dir)).sort();
+          for (const name of names) {
+            const full = nodePath.join(dir, name);
+            const rel = prefix ? `${prefix}/${name}` : name;
+            const entryInfo = await lstat(full, { bigint: true });
+            if (entryInfo.isDirectory()) {
+              await walk(full, rel);
+            } else if (entryInfo.isSymbolicLink()) {
+              files.push(full);
+              const pointer = await readlink(full);
+              entries.push(
+                `l:${rel}:${entryInfo.dev}:${entryInfo.ino}:${entryInfo.mode}:${entryInfo.mtimeNs}:${entryInfo.ctimeNs}:${pointer}`,
+              );
+            } else {
+              files.push(full);
+              entries.push(
+                `f:${rel}:${entryInfo.dev}:${entryInfo.ino}:${entryInfo.mode}:${entryInfo.size}:${entryInfo.mtimeNs}:${entryInfo.ctimeNs}`,
+              );
+            }
+          }
+        };
+        await walk(root, '');
+        return { entries, files, dirs };
+      };
       const copyDirectory = async () => {
+        let before: Awaited<ReturnType<typeof snapshot>>;
         try {
+          before = await snapshot(source);
           for (const name of await readdir(source))
             await cp(nodePath.join(source, name), nodePath.join(target, name), {
               recursive: true,
@@ -445,11 +481,19 @@ export function createLocalFiles(
               verbatimSymlinks: true,
               preserveTimestamps: true,
             });
+          const after = await snapshot(source);
+          if (
+            before.entries.length !== after.entries.length ||
+            before.entries.some((entry, index) => entry !== after.entries[index])
+          ) {
+            throw new IntegrationError(`${source} changed while moving. Try the move again.`);
+          }
         } catch (copy) {
           await rm(target, { recursive: true, force: true });
           throw copy;
         }
-        await rm(source, { recursive: true });
+        for (const file of before.files) await rm(file);
+        for (const dir of [...before.dirs].reverse()) await rmdir(dir);
       };
       if (process.platform === 'win32') {
         return rename(source, target).catch(async (error: NodeJS.ErrnoException) => {
