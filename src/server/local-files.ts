@@ -141,6 +141,16 @@ const changedRead = (path: string, reason?: unknown) =>
   );
 const keepOutLimit = 100;
 
+async function removeCopied(source: string, copy: string) {
+  for (const name of await readdir(copy)) {
+    const copied = nodePath.join(copy, name);
+    if ((await lstat(copied)).isDirectory())
+      await removeCopied(nodePath.join(source, name), copied);
+    else await rm(nodePath.join(source, name));
+  }
+  await rmdir(source);
+}
+
 type Turn = { turnId: string; threadId: string };
 type Query = Pick<Pool, 'query'>;
 export type WorkspaceRead = (input: z.infer<typeof workspaceFileReference>) => Promise<Uint8Array>;
@@ -435,49 +445,15 @@ export function createLocalFiles(
       });
     }
     if (info.isDirectory()) {
-      const fingerprint = async (root: string) => {
-        const hash = createHash('sha256');
-        const sep = '\u0000';
-        const walk = async (dir: string, prefix: string) => {
-          const dirInfo = await lstat(dir, { bigint: true });
-          hash.update(
-            `d${sep}${prefix}${sep}${dirInfo.dev}${sep}${dirInfo.ino}${sep}${dirInfo.mode}${sep}${dirInfo.mtimeNs}${sep}${dirInfo.ctimeNs}${sep}`,
-          );
-          const names = (await readdir(dir)).sort();
-          for (const name of names) {
-            const full = nodePath.join(dir, name);
-            const rel = prefix ? `${prefix}/${name}` : name;
-            const entryInfo = await lstat(full, { bigint: true });
-            if (entryInfo.isDirectory()) {
-              await walk(full, rel);
-            } else if (entryInfo.isSymbolicLink()) {
-              const pointer = await readlink(full);
-              hash.update(
-                `l${sep}${rel}${sep}${entryInfo.dev}${sep}${entryInfo.ino}${sep}${entryInfo.mode}${sep}${entryInfo.mtimeNs}${sep}${entryInfo.ctimeNs}${sep}${pointer}${sep}`,
-              );
-            } else {
-              hash.update(
-                `f${sep}${rel}${sep}${entryInfo.dev}${sep}${entryInfo.ino}${sep}${entryInfo.mode}${sep}${entryInfo.size}${sep}${entryInfo.mtimeNs}${sep}${entryInfo.ctimeNs}${sep}`,
-              );
-            }
-          }
-        };
-        await walk(root, '');
-        return hash.digest('hex');
-      };
-      const removeCopied = async (srcDir: string, dstDir: string) => {
-        for (const name of await readdir(dstDir)) {
-          const srcChild = nodePath.join(srcDir, name);
-          const dstChild = nodePath.join(dstDir, name);
-          const dstInfo = await lstat(dstChild);
-          if (dstInfo.isDirectory()) await removeCopied(srcChild, dstChild);
-          else await rm(srcChild);
+      const windows = process.platform === 'win32';
+      if (!windows) await mkdir(target).catch(fail);
+      return rename(source, target).catch(async (error: NodeJS.ErrnoException) => {
+        if (error.code !== 'EXDEV') {
+          if (!windows) await rmdir(target).catch(() => undefined);
+          return fail(error);
         }
-        await rmdir(srcDir);
-      };
-      const copyDirectory = async () => {
+        if (windows) await mkdir(target).catch(fail);
         try {
-          const before = await fingerprint(source);
           for (const name of await readdir(source))
             await cp(nodePath.join(source, name), nodePath.join(target, name), {
               recursive: true,
@@ -486,33 +462,11 @@ export function createLocalFiles(
               verbatimSymlinks: true,
               preserveTimestamps: true,
             });
-          const after = await fingerprint(source);
-          if (before !== after) {
-            throw new IntegrationError(
-              `${source} changed while moving. Nothing was changed. Try the move again.`,
-              409,
-            );
-          }
         } catch (copy) {
           await rm(target, { recursive: true, force: true });
           throw copy;
         }
         await removeCopied(source, target);
-      };
-      if (process.platform === 'win32') {
-        return rename(source, target).catch(async (error: NodeJS.ErrnoException) => {
-          if (error.code !== 'EXDEV') return fail(error);
-          await mkdir(target).catch(fail);
-          await copyDirectory();
-        });
-      }
-      await mkdir(target).catch(fail);
-      return rename(source, target).catch(async (error: NodeJS.ErrnoException) => {
-        if (error.code !== 'EXDEV') {
-          await rmdir(target).catch(() => undefined);
-          throw error;
-        }
-        await copyDirectory();
       });
     }
     if (info.isSymbolicLink()) {
